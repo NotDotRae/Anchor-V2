@@ -1,0 +1,6 @@
+{
+  "name": "anchorbot-convex", "private": true, "version": "2.0.0",
+  "scripts": {"typecheck": "tsc --noEmit", "deploy": "convex deploy", "codegen": "convex codegen"},
+  "dependencies": {"convex": "1.45.0"},
+  "devDependencies": {"typescript": "5.9.3", "@types/node": "24.10.1"}
+}

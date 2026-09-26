@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anchorbot"
+version = "2.0.0"
+description = "Slash-only Hikari sticky-message bot with an independent shard supervisor"
+requires-python = ">=3.12"
+dependencies = ["hikari==2.6.0", "aiohttp==3.14.3", "psutil==7.2.2", "tzdata==2026.4"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.16.7"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.setuptools.packages.find]
+include = ["anchorbot*"]
