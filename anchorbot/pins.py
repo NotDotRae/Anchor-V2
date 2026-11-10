@@ -3,6 +3,7 @@ import logging
 import secrets
 import time
 from collections import defaultdict
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import hikari
 
@@ -23,9 +24,67 @@ class Pins:
         self.recovered = set()
         self.retry_after = {}
         self.closing = False
+        self.departed_guilds = set()
 
     def state(self, channel, guild):
-        return self.states.setdefault(str(channel), {"id": str(channel), "guild_id": str(guild), "pins": {}})
+        if str(guild) in self.departed_guilds:
+            raise ValueError("Anchor is no longer in this server.")
+        state = self.states.setdefault(str(channel), {"id": str(channel), "guild_id": str(guild), "pins": {}})
+        if state["guild_id"] != str(guild):
+            raise ValueError("Channel does not belong to this server.")
+        return state
+
+    async def verified_webhook(self, state):
+        # Webhooks can be moved after configuration. Never trust a saved URL's scope.
+        hook, token = webhook_parts(state["webhook_url"])
+        channel = await self.bot.rest.fetch_channel(int(state["id"]))
+        webhook = await self.bot.rest.fetch_webhook(hook, token=token)
+        if (str(getattr(channel, "guild_id", None)) != state["guild_id"]
+                or str(webhook.channel_id) != state["id"]
+                or str(webhook.guild_id) != state["guild_id"]):
+            raise ValueError("The saved webhook no longer belongs to this channel. Set it again.")
+        return hook, token
+
+    def discard_channel(self, channel):
+        """Called while holding the channel lock to prevent stale writes after deletion."""
+        self.db.remove_channel(channel)
+        self.forget_channel(channel)
+
+    def forget_channel(self, channel):
+        self.states.pop(channel, None)
+        self.recovered.discard(channel)
+        self.retry_after.pop(channel, None)
+        for kind in THRESHOLDS:
+            self.positions.pop((channel, kind), None)
+
+    @asynccontextmanager
+    async def channel_lock(self, channel):
+        channel = str(channel)
+        async with self.locks[channel]:
+            try:
+                yield
+            except hikari.ForbiddenError as error:
+                if error.code in {50001, 50013}:  # Missing Access / Missing Permissions
+                    self.discard_channel(channel)
+                    log.warning("channel_permissions_lost channel=%s cleanup_queued=true", channel)
+                raise
+
+    async def remove_channel(self, channel):
+        channel = str(channel)
+        async with self.locks[channel]:
+            self.discard_channel(channel)
+
+    async def remove_guild(self, guild):
+        guild = str(guild)
+        self.departed_guilds.add(guild)
+        channels = [s["id"] for s in self.states.values() if s["guild_id"] == guild]
+        async with AsyncExitStack() as stack:
+            for channel in sorted(channels):
+                await stack.enter_async_context(self.locks[channel])
+            self.db.remove_guild(guild)
+            for channel in channels:
+                self.forget_channel(channel)
+        log.info("guild_data_removed guild=%s channels=%s cleanup_queued=true", guild, len(channels))
 
     async def reconcile(self, state):
         channel = state["id"]
@@ -83,7 +142,7 @@ class Pins:
         for message in list(pin.get("retired_ids", [])):
             try:
                 if kind == "webhook":
-                    hook, token = webhook_parts(state["webhook_url"])
+                    hook, token = await self.verified_webhook(state)
                     await self.bot.rest.delete_webhook_message(hook, token, int(message))
                 else:
                     await self.bot.rest.delete_message(int(state["id"]), int(message))
@@ -98,6 +157,8 @@ class Pins:
             self.db.save_channel(state)
 
     async def repost(self, state, kind):
+        if kind == "webhook":
+            await self.verified_webhook(state)
         pin = state["pins"][kind]
         if pin.get("message_id"):
             pin.setdefault("retired_ids", []).append(pin["message_id"])
@@ -108,7 +169,7 @@ class Pins:
             pin.setdefault("nonce", secrets.token_hex(12))
             self.db.save_channel(state)
         if kind == "webhook":
-            hook, token = webhook_parts(state["webhook_url"])
+            hook, token = await self.verified_webhook(state)
             message = await self.bot.rest.execute_webhook(
                 hook, token, embed=pin_embed(state, pin["text"]), flags=SILENT, **SAFE_MENTIONS
             )
@@ -131,8 +192,10 @@ class Pins:
         await self.cleanup(state, kind, pin)
         log.debug("pin_reposted channel=%s kind=%s message=%s", state["id"], kind, message.id)
 
-    async def start(self, channel, guild, kind, text):
-        async with self.locks[str(channel)]:
+    async def start(self, channel, guild, kind, text, *, authorize=None):
+        async with self.channel_lock(channel):
+            if authorize:
+                authorize()
             state = self.state(channel, guild)
             await self.reconcile(state)
             for old_kind in list(state["pins"]):
@@ -154,9 +217,11 @@ class Pins:
         self.positions.pop((state["id"], kind), None)
         self.db.save_channel(state)
 
-    async def stop(self, channel, kinds=None):
+    async def stop(self, channel, kinds=None, *, authorize=None):
         channel = str(channel)
-        async with self.locks[channel]:
+        async with self.channel_lock(channel):
+            if authorize:
+                authorize()
             state = self.states.get(channel)
             if not state:
                 return
@@ -191,7 +256,7 @@ class Pins:
 
     async def process(self, channel):
         try:
-            async with self.locks[channel]:
+            async with self.channel_lock(channel):
                 state = self.states.get(channel)
                 if not state:
                     return
@@ -213,6 +278,10 @@ class Pins:
                             await self.repost(state, kind)
                 finally:
                     guild_context.reset(token)
+        except hikari.ForbiddenError as error:
+            if error.code not in {50001, 50013}:
+                self.retry_after[channel] = time.time() + 60
+            log.exception("pin_activity_forbidden channel=%s", channel)
         except Exception:
             self.retry_after[channel] = time.time() + 60
             log.exception("pin_activity_failed channel=%s retry_seconds=60", channel)
@@ -220,15 +289,7 @@ class Pins:
             self.tasks.pop(channel, None)
 
     async def channel_deleted(self, event):
-        channel = str(event.channel_id)
-        async with self.locks[channel]:
-            self.states.pop(channel, None)
-            self.recovered.discard(channel)
-            self.db.remove_channel(channel)
-            for kind in THRESHOLDS:
-                self.positions.pop((channel, kind), None)
-        self.locks.pop(channel, None)
-        self.retry_after.pop(channel, None)
+        await self.remove_channel(event.channel_id)
 
     async def close(self):
         self.closing = True

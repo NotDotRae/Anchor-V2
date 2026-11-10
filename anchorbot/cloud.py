@@ -21,6 +21,7 @@ class Cloud:
             "POST" if body is not None else "GET",
             url,
             json=body,
+            allow_redirects=False,
             headers={"Authorization": "Bearer " + self.config["convex_key"]},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as response:

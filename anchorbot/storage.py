@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -7,6 +8,18 @@ from pathlib import Path
 class LocalDB:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # SQLite contains webhook credentials and supervisor control requests.
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        if os.name != "nt":
+            for suffix in ("-wal", "-shm", "-journal"):
+                sidecar = Path(str(path) + suffix)
+                if sidecar.exists():
+                    sidecar.chmod(0o600)
         self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -22,6 +35,8 @@ class LocalDB:
             CREATE INDEX IF NOT EXISTS samples_time ON samples(time);
             CREATE TABLE IF NOT EXISTS controls(id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT,
                 count INTEGER, status TEXT DEFAULT 'pending', created REAL);
+            CREATE TABLE IF NOT EXISTS permission_confirmations(token TEXT PRIMARY KEY, guild TEXT NOT NULL,
+                channel TEXT NOT NULL, actor TEXT NOT NULL, expires REAL NOT NULL, snapshot TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, created REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS interactions_created ON interactions(created);
         """)
@@ -56,6 +71,7 @@ class LocalDB:
 
     def remove_channel(self, channel):
         with self.db:
+            self.db.execute("DELETE FROM permission_confirmations WHERE channel=?", (str(channel),))
             self.db.execute("DELETE FROM channels WHERE id=?", (str(channel),))
             self.db.execute(
                 "INSERT INTO outbox VALUES (?,NULL,1) ON CONFLICT(id) DO UPDATE SET "
@@ -70,6 +86,18 @@ class LocalDB:
                 "INSERT INTO channels VALUES (?,?,?)",
                 [(s["id"], s["guild_id"], json.dumps(s)) for s in states],
             )
+
+    def remove_guild(self, guild):
+        with self.db:
+            channels = self.db.execute("SELECT id FROM channels WHERE guild=?", (str(guild),)).fetchall()
+            self.db.executemany(
+                "INSERT INTO outbox VALUES (?,NULL,1) ON CONFLICT(id) DO UPDATE SET "
+                "value=NULL,revision=outbox.revision+1",
+                [(row["id"],) for row in channels],
+            )
+            self.db.execute("DELETE FROM permission_confirmations WHERE guild=?", (str(guild),))
+            self.db.execute("DELETE FROM channels WHERE guild=?", (str(guild),))
+            self.db.execute("DELETE FROM guild_load WHERE guild=?", (str(guild),))
 
     def pending(self):
         return [dict(r) for r in self.db.execute("SELECT * FROM outbox LIMIT 100")]

@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 from .admin import AdminCommands
+from .perms import PermissionCommands
 from .router import Router
 from .sticky import StickyCommands
 from .utility import UtilityCommands
@@ -13,6 +14,7 @@ def configure(app):
     app.sticky = StickyCommands(app)
     app.utility = UtilityCommands(app)
     app.admin = AdminCommands(app)
+    app.perms = PermissionCommands(app)
 
 
 def builders():

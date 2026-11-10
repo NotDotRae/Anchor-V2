@@ -3,49 +3,40 @@ from datetime import UTC, datetime
 
 import hikari
 
+from ..command_access import grants, is_admin
+from ..permissions import readable_channels
 from ..style import SAFE_MENTIONS, embed, uptime
-
-FEATURES = '-Unlimited pinned messages.\n-Use Custom Embeds as pins.\n-Create slower posting pins.\n-Removes "Pinned Message:" header.\n-All features are free to use.\n-More to come!'
 
 
 class UtilityCommands:
     def __init__(self, app):
         self.app = app
         descriptions = {
-            "help": "Show AnchorBot commands.",
-            "commands": "Show AnchorBot commands.",
+            "help": "Show Anchor commands.",
+            "commands": "Show Anchor commands.",
             "ping": "Show gateway ping.",
-            "about": "Show AnchorBot information.",
-            "serverinfo": "Show server information.",
-            "uptime": "Show AnchorBot uptime.",
-            "features": "Show AnchorBot features.",
-            "anchorbotfeatures": "Show AnchorBot features.",
-            "permcheck": "Check AnchorBot channel permissions.",
-            "shard": "Show shard info.",
-            "shards": "Show shard info.",
-            "shardping": "Show shard ping info.",
-            "donate": "Support AnchorBot on Ko-fi.",
-            "tos": "View AnchorBot's Terms of Service.",
+            "about": "Show Anchor information.",
+            "server info": "Show server information.",
+            "uptime": "Show Anchor uptime.",
+            "bot perms": "Check Anchor channel permissions.",
+            "shard info": "Show shard info.",
+            "shard ping": "Show shard ping info.",
+            "donate": "Support Anchor on Ko-fi.",
+            "tos": "View Anchor's Terms of Service.",
+            "support": "Get the Anchor support server link.",
         }
         for name, description in descriptions.items():
             app.router.add(name, description, self.handle)
-        for name, description, key, option_description, limit in (
-            ("poll", "Create a yes/no poll.", "question", "Poll question.", 4000),
-            ("apoll", "Create a multiple-choice poll.", "poll", "Question, option1, option2...", 1000),
-            ("advancedpoll", "Create a multiple-choice poll.", "poll", "Question, option1, option2...", 1000),
-            ("embed", "Send your text as an embed.", "message", "Embed text.", 1000),
-            ("getshard", "Get the shard for a server ID.", "server_id", "Server ID.", 20),
-        ):
-            app.router.add(
-                name,
-                description,
-                self.handle,
-                (key, option_description, hikari.OptionType.STRING, True),
-                maximum=limit,
-            )
         app.router.add(
-            "userinfo",
-            "Show information for a member.",
+            "shard get",
+            "Get the shard for a server ID.",
+            self.handle,
+            ("server_id", "Server ID.", hikari.OptionType.STRING, True),
+            maximum=20,
+        )
+        app.router.add(
+            "user info",
+            "Show member information and granted channel access.",
             self.userinfo,
             ("user", "Member.", hikari.OptionType.USER, False),
         )
@@ -54,22 +45,26 @@ class UtilityCommands:
         return [shard for worker in self.app.db.workers() for shard in worker.get("shards", [])]
 
     async def handle(self, ctx):
-        name = ctx.i.command_name
+        name = ctx.command_name
         shard_id = (int(ctx.i.guild_id) >> 22) % self.app.count
         rows = self.shard_rows()
         pings = [s["latency_ms"] for s in rows if s.get("latency_ms") is not None]
         average = round(sum(pings) / len(pings)) if pings else "unavailable"
         if name in {"help", "commands"}:
-            result = embed("**-AnchorBot Commands-**", "Use slash commands to manage AnchorBot.")
+            result = embed("**-Anchor Commands-**", "Use slash commands to manage Anchor.")
             result.add_field(
                 "Pin Commands:",
-                "`/stick <message>`\n`/stickembed <message>`\n`/stickslow <message>`\n`/stickstop`\n`/getstickies`",
+                "`/stick start <message>`\n`/stick embed <message>`\n`/stick slow <message>`\n`/stick webhook <message>`\n`/stick stop`\n`/stick list`",
             )
             result.add_field(
                 "Utility Commands:",
-                "`/poll`, `/apoll`, `/userinfo`, `/serverinfo`, `/embed`, `/permcheck`, `/features`, `/tos`",
+                "`/user info`, `/server info`, `/bot perms`, `/tos`, `/support`",
             )
-            result.add_field("Settings:", "`/setimage`, `/setbigimage`, `/setwebhook`")
+            result.add_field("Settings:", "`/image set`, `/image get`, `/image remove`, `/image big set`, `/image big get`, `/image big remove`, `/webhook set`, `/webhook stop`")
+            if is_admin(ctx.i):
+                result.add_field("Administrator permissions:",
+                    "`/perms add user`, `/perms add role`, `/perms remove user`, `/perms remove role`, "
+                    "`/perms list`, `/perms check`, `/perms clear`")
             button = hikari.impl.MessageActionRowBuilder().add_link_button(
                 self.app.config["kofi_url"], label="Donate to keep this project free"
             )
@@ -79,8 +74,16 @@ class UtilityCommands:
                 self.app.config["kofi_url"], label="Donate on Ko-fi"
             )
             await ctx.reply(
-                embed=embed("-AnchorBot-", "Donate to keep this project free."),
+                embed=embed("-Anchor-", "Donate to keep this project free."),
                 components=[button],
+            )
+        elif name == "support":
+            url = self.app.config.get("support_url", "")
+            if not url:
+                await ctx.reply("The support server link has not been configured yet.", ephemeral=True)
+                return
+            await ctx.reply(
+                embed=embed("Anchor Support", f"[Join the support server]({url})"),
             )
         elif name == "tos":
             url = self.app.config.get("tos_url", "")
@@ -89,11 +92,9 @@ class UtilityCommands:
                 return
             button = hikari.impl.MessageActionRowBuilder().add_link_button(url, label="Terms of Service")
             await ctx.reply(
-                embed=embed("-AnchorBot Terms of Service-", f"[Read the Terms of Service]({url})"),
+                embed=embed("-Anchor Terms of Service-", f"[Read the Terms of Service]({url})"),
                 components=[button],
             )
-        elif name in {"features", "anchorbotfeatures"}:
-            await ctx.reply(embed=embed("-AnchorBot-").add_field("Features:", FEATURES))
         elif name == "uptime":
             await ctx.reply(f"Uptime: ``{uptime(time.time() - self.app.started)}``")
         elif name == "ping":
@@ -102,20 +103,22 @@ class UtilityCommands:
             await ctx.reply(
                 f">>> **Pong!**\nThis Shard: (`{shard_id}`) Ping: `{ping}`.\nAll Shards Average Ping: `{average}`ms."
             )
-        elif name in {"shard", "shards"}:
+        elif name == "shard info":
             await ctx.reply(
                 embed=embed("-Shard Info-").add_field(
                     "Shards:", f"Total Shards: {self.app.count}\nThis Guilds Shard: {shard_id}"
                 )
             )
-        elif name == "getshard":
+        elif name == "shard get":
             server = ctx.value("server_id")
             if not server.isdecimal() or not 0 < int(server) < 2**64:
                 raise ValueError("Something went wrong. Use a numeric server ID.")
             await ctx.reply(
                 f"`{server}` is on shard: **{(int(server) >> 22) % self.app.count}**", ephemeral=True
             )
-        elif name == "shardping":
+        elif name == "shard ping":
+            if not await ctx.can_post():
+                return
             lines = [f"__**Shard Pings:**__\n`Average: {average}`\n"]
             lines += [
                 f"**Shard:** {s['id']} / {self.app.count} **Ping:** {round(s['latency_ms']) if s.get('latency_ms') is not None else 'unavailable'}ms. **Status:** {s['status']}\n"
@@ -133,71 +136,47 @@ class UtilityCommands:
                 await ctx.i.execute(chunk, **SAFE_MENTIONS)
         elif name == "about":
             guilds = sum(w.get("guilds", 0) for w in self.app.db.workers())
-            result = embed("**-AnchorBot Information-**")
+            result = embed("**-Anchor Information-**")
             result.add_field("Developed By:", f"NotDotRae\n(`{self.app.config['owner_id']}`)")
             result.add_field("Ping:", f"{average}ms")
             result.add_field("Uptime:", f"``{uptime(time.time() - self.app.started)}``", inline=True)
             result.add_field("Shards:", f"Shard **{shard_id} of {self.app.count}**")
-            result.add_field("Guilds:", f"AnchorBot is in **{guilds:,}** Guilds")
+            result.add_field("Guilds:", f"Anchor is in **{guilds:,}** Guilds")
             result.add_field("Included Features:", "All pin and embed features are free to use.")
-            result.set_footer("AnchorBot is Made with Python & Hikari", icon=self.app.avatar)
+            result.set_footer("Anchor is Made with Python & Hikari", icon=self.app.avatar)
             await ctx.reply(embed=result)
-        elif name in {"poll", "apoll", "advancedpoll", "embed"}:
-            await self.create(ctx)
-        elif name == "permcheck":
+        elif name == "bot perms":
             permissions = ctx.i.app_permissions
-            result = "**AnchorBot has the following permissions in this CHANNEL:**\n\n"
+            send = (hikari.Permissions.SEND_MESSAGES_IN_THREADS if ctx.i.channel.type in {
+                hikari.ChannelType.GUILD_PUBLIC_THREAD, hikari.ChannelType.GUILD_PRIVATE_THREAD,
+                hikari.ChannelType.GUILD_NEWS_THREAD,
+            } else hikari.Permissions.SEND_MESSAGES)
+            lines = []
             for label, permission in (
-                ("Message History", hikari.Permissions.READ_MESSAGE_HISTORY),
+                ("View Channel", hikari.Permissions.VIEW_CHANNEL),
+                ("Send Messages", send),
+                ("Read Message History", hikari.Permissions.READ_MESSAGE_HISTORY),
                 ("Manage Messages", hikari.Permissions.MANAGE_MESSAGES),
                 ("Embed Links", hikari.Permissions.EMBED_LINKS),
-                ("Add Message Reactions", hikari.Permissions.ADD_REACTIONS),
+                ("Add Reactions", hikari.Permissions.ADD_REACTIONS),
+                ("Manage Webhooks", hikari.Permissions.MANAGE_WEBHOOKS),
             ):
                 allowed = bool(permissions & (permission | hikari.Permissions.ADMINISTRATOR))
-                result += f"```{'java' if allowed else 'c'}\n{label}: {str(allowed).lower()}```"
-            await ctx.reply(result, ephemeral=True)
-        elif name == "serverinfo":
+                lines.append(f"**{label}:** {allowed}")
+            await ctx.reply(embed=embed("Anchor bot permissions", f"Channel: <#{ctx.i.channel_id}>\n\n" + "\n".join(lines)), ephemeral=True)
+        elif name == "server info":
             await self.serverinfo(ctx)
 
-    async def create(self, ctx):
-        name = ctx.i.command_name
-        emojis = []
-        if name == "embed":
-            message = ctx.value("message")
-            if len(message) > 1000:
-                raise ValueError("Text is too long; it must be under 1000 characters.")
-            result = embed(description=message).set_footer(f"Embed By: {ctx.i.user.username}")
-        else:
-            result = embed().set_footer(f"Poll by: {ctx.i.user}", icon=ctx.i.user.make_avatar_url())
-            if name == "poll":
-                result.description = ctx.value("question")
-                emojis = ["👍", "👎", "🤷"]
-            else:
-                parts = [p.strip() for p in ctx.value("poll").split(",")]
-                if len(parts) < 3:
-                    raise ValueError("Use this format: `Question, Option1, Option2`.")
-                if len(parts) > 8:
-                    raise ValueError("A poll supports a maximum of seven options.")
-                result.title, result.description = "POLL:", parts[0]
-                emojis = ["🇦", "🇧", "🇨", "🇩", "🇪", "🇫", "🇬"][: min(len(parts) - 1, 7)]
-                result.add_field(
-                    "Options:",
-                    "".join(f"{emoji}**:** {option}\n" for emoji, option in zip(emojis, parts[1:])),
-                )
-        await ctx.defer(ephemeral=True)
-        message = await self.app.bot.rest.create_message(ctx.i.channel_id, embed=result, **SAFE_MENTIONS)
-        for emoji in emojis:
-            await self.app.bot.rest.add_reaction(ctx.i.channel_id, message.id, emoji)
-        await ctx.reply("Embed sent." if name == "embed" else "Poll created.")
-
     async def userinfo(self, ctx):
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
         user_id = ctx.value("user", ctx.i.user.id)
         try:
             member = await self.app.bot.rest.fetch_member(ctx.i.guild_id, user_id)
         except hikari.NotFoundError:
             await ctx.reply("That user is not in this server.")
             return
+        if member.guild_id != ctx.i.guild_id:
+            raise ValueError("That user is not in this server.")
         user = member.user
         now = datetime.now(UTC)
 
@@ -230,7 +209,31 @@ class UtilityCommands:
             roles if len(roles) <= 1000 else "Reached Max Embed Length. *(Too many roles to display)*",
         )
         result.set_footer(user.username, icon=user.display_avatar_url)
-        await ctx.reply(embed=result)
+        pages = [result]
+        try:
+            readable = await readable_channels(ctx)
+        except (hikari.ForbiddenError, hikari.NotFoundError):
+            result.add_field("Channel grants", "Unavailable")
+        else:
+            for state in sorted(self.app.db.channels(), key=lambda s: s["id"]):
+                if state["guild_id"] != str(ctx.i.guild_id) or state["id"] not in readable:
+                    continue
+                current = grants(state)
+                direct = str(user.id) in current["users"]
+                roles = [role for role in current["roles"] if int(role) in member.role_ids]
+                if not direct and not roles:
+                    continue
+                text = f"User grant: {direct}\nRole grant: " + (", ".join(f"<@&{role}>" for role in roles) or "N/A")
+                while text:
+                    cut = len(text) if len(text) <= 1000 else text.rfind(" ", 0, 1000)
+                    chunk, text = text[:cut], text[cut:].lstrip()
+                    current_page = pages[-1]
+                    if len(current_page.fields) >= 20 or current_page.total_length() + len(chunk) + 50 > 5500:
+                        pages.append(embed("User channel grants").set_footer(user.username))
+                    pages[-1].add_field(f"Channel: <#{state['id']}>", chunk)
+        await ctx.reply(embed=pages[0], ephemeral=True)
+        for page in pages[1:]:
+            await ctx.i.execute(embed=page, flags=hikari.MessageFlag.EPHEMERAL, **SAFE_MENTIONS)
 
     async def serverinfo(self, ctx):
         await ctx.defer()

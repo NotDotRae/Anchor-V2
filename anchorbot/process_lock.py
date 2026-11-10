@@ -22,7 +22,7 @@ class ProcessLock:
             self.file.flush()
         except OSError:
             self.file.close()
-            raise RuntimeError("Another AnchorBot supervisor is using this database") from None
+            raise RuntimeError("Another Anchor supervisor is using this database") from None
         return self
 
     def __exit__(self, *args):

@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -7,12 +8,15 @@ from zoneinfo import ZoneInfo
 
 def load(path: str | Path, *, credentials: bool = True) -> dict:
     path = Path(path).resolve()
+    if os.name != "nt":
+        path.chmod(0o600)
     config = json.loads(path.read_text(encoding="utf-8-sig"))
-    tos = config.setdefault("tos_url", "")
-    if not isinstance(tos, str):
-        raise ValueError("tos_url must be an HTTPS URL or an empty string")
-    if tos and (urlparse(tos).scheme != "https" or not urlparse(tos).hostname or len(tos) > 512):
-        raise ValueError("tos_url must be an HTTPS URL of at most 512 characters")
+    for key in ("tos_url", "support_url"):
+        url = config.setdefault(key, "")
+        if not isinstance(url, str):
+            raise ValueError(f"{key} must be an HTTPS URL or an empty string")
+        if url and (urlparse(url).scheme != "https" or not urlparse(url).hostname or len(url) > 512):
+            raise ValueError(f"{key} must be an HTTPS URL of at most 512 characters")
     for key in (
         "shard_count",
         "worker_count",
@@ -60,6 +64,15 @@ def set_shard_count(path: str | Path, count: int) -> None:
     path = Path(path)
     raw = json.loads(path.read_text(encoding="utf-8-sig"))
     raw["shard_count"] = count
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # A unique, owner-only temporary file avoids exposing secrets or following
+    # a pre-created config.json.tmp symlink during an atomic rewrite.
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=".anchorbot-config-")
+    tmp = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(json.dumps(raw, indent=2) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)

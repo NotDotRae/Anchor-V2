@@ -33,7 +33,7 @@ class AdminCommands:
         db = self.app.db
         workers = db.workers()
         shards = [(w, s) for w in workers for s in w.get("shards", [])]
-        result = embed("AnchorBot Admin Stats", "Runtime and shard status for AnchorBot.")
+        result = embed("Anchor Admin Stats", "Runtime and shard status for Anchor.")
         deployment = db.get("deployment", {})
         count = deployment.get("shard_count", self.app.count)
         supervisor = db.get("supervisor", {})
@@ -50,7 +50,7 @@ class AdminCommands:
                 "Worker memory:", f"{sum(w.get('rss', 0) for w in workers) / 2**20:,.1f} MiB", inline=True
             )
             result.add_field(
-                "AnchorBot session uptime:",
+                "Anchor session uptime:",
                 f"Uptime: ``{uptime(time.time() - supervisor.get('started', time.time()))}``",
             )
             result.add_field("Shards:", f"{count} shards across {len(workers)} worker processes")
@@ -93,7 +93,7 @@ class AdminCommands:
                 result.add_field("Guild load:", "Waiting for worker samples.")
         else:
             raise ValueError("Unknown admin stats view.")
-        result.set_footer(f"AnchorBot · {view.title()} · Page {page + 1}/{pages}")
+        result.set_footer(f"Anchor · {view.title()} · Page {page + 1}/{pages}")
         row = hikari.impl.MessageActionRowBuilder()
         for target, label in (
             ("overview", "Overview"),

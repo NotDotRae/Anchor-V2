@@ -86,7 +86,7 @@ def start(arguments):
     with launch_lock():
         pid = recorded_pid()
         if pid and matches(pid):
-            print(f"AnchorBot is already running with PID {pid}.")
+            print(f"Anchor is already running with PID {pid}.")
             return
         python = runtime()
         environment = os.environ.copy()
@@ -105,8 +105,8 @@ def start(arguments):
         time.sleep(0.3)
         if process.poll() is not None:
             (ROOT / "app.pid").unlink(missing_ok=True)
-            raise RuntimeError("AnchorBot exited during startup. See app.log.")
-        print(f"AnchorBot started with PID {process.pid}. Logs: {ROOT / 'app.log'}")
+            raise RuntimeError("Anchor exited during startup. See app.log.")
+        print(f"Anchor started with PID {process.pid}. Logs: {ROOT / 'app.log'}")
 
 
 def stop():
@@ -114,7 +114,7 @@ def stop():
         pid = recorded_pid()
         if not pid or not matches(pid):
             (ROOT / "app.pid").unlink(missing_ok=True)
-            print("AnchorBot is not running.")
+            print("Anchor is not running.")
             return
         descriptor = os.pidfd_open(pid)
         try:
@@ -130,7 +130,7 @@ def stop():
         finally:
             os.close(descriptor)
         (ROOT / "app.pid").unlink(missing_ok=True)
-        print(f"Stopped AnchorBot PID {pid}.")
+        print(f"Stopped Anchor PID {pid}.")
 
 
 def deploy():

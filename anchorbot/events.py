@@ -7,6 +7,18 @@ from .style import SAFE_MENTIONS, embed
 log = logging.getLogger(__name__)
 
 
+def welcome_embed(config):
+    links = []
+    if config.get("support_url"):
+        links.append(f"[Support server]({config['support_url']})")
+    if config.get("kofi_url"):
+        links.append(f"[Donate]({config['kofi_url']})")
+    description = "Run `/help` to get started."
+    if links:
+        description += "\n\n" + " · ".join(links)
+    return embed("Thanks for choosing Anchor!", description)
+
+
 class GuildEvents:
     def __init__(self, app):
         self.app = app
@@ -14,7 +26,7 @@ class GuildEvents:
         app.bot.subscribe(hikari.GuildLeaveEvent, self.leave)
 
     async def notify_owner(self, guild_id, guild, *, joined):
-        result = embed("AnchorBot Joined a New Server!" if joined else "AnchorBot Was Removed From a Server")
+        result = embed("Anchor Joined a New Server!" if joined else "Anchor Was Removed From a Server")
         result.color = 0x00FF00 if joined else 0xFF0000
         result.add_field("Server Name", guild.name if guild else "Unavailable")
         result.add_field("Server ID", str(guild_id))
@@ -33,35 +45,18 @@ class GuildEvents:
 
     async def join(self, event):
         guild = event.guild
+        self.app.pins.departed_guilds.discard(str(guild.id))
         log.info("guild_join guild=%s shard=%s", guild.id, event.shard.id)
         await self.notify_owner(guild.id, guild, joined=True)
         if self.app.config.get("welcome_dm"):
-            result = embed(
-                "**Thank You For Adding AnchorBot To Your Server!**",
-                "Here are the basics to get you started:",
-            )
-            result.add_field(
-                "Note:",
-                "The pinned message is sent every 5 messages or 15 seconds to comply with discord TOS.",
-            )
-            result.add_field("**Commands:** ", "Use `/help` to see all commands.")
-            result.add_field(
-                "Issues?",
-                "Make sure the bot has permission to send messages, delete messages, and bypass slow mode in pin channels.",
-            )
-            result.add_field(
-                "Included Features: ",
-                '-Unlimited Pinned Messages.\n-Use Custom Embeds as Pins.\n-Create a pin embed with a custom name and profile pic.\n-Removes "Pinned Message:" header.\n-Slower Posting Pins.\n-All features are free to use.\n-More to come!',
-            )
-            result.set_footer("AnchorBot", icon=self.app.avatar)
+            result = welcome_embed(self.app.config)
             try:
                 channel = await self.app.bot.rest.create_dm_channel(guild.owner_id)
-                await self.app.bot.rest.create_message(channel.id, embed=result)
+                await self.app.bot.rest.create_message(channel.id, embed=result, **SAFE_MENTIONS)
             except hikari.HikariError:
                 log.info("welcome_dm_unavailable guild=%s", guild.id)
 
     async def leave(self, event):
         log.info("guild_leave guild=%s shard=%s", event.guild_id, event.shard.id)
-        with self.app.db.db:
-            self.app.db.db.execute("DELETE FROM guild_load WHERE guild=?", (str(event.guild_id),))
+        await self.app.pins.remove_guild(event.guild_id)
         await self.notify_owner(event.guild_id, event.old_guild, joined=False)
