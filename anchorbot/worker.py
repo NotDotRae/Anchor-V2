@@ -117,6 +117,7 @@ class Worker:
             log.error("shard_reconnect_timeout")
             self.stop.set()
             return
+        self.pins.poll_expiries()
         guilds = self.bot.cache.get_guilds_view()
         value, loads = self.metrics.snapshot(guilds)
         shards = []

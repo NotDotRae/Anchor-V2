@@ -1,5 +1,3 @@
-"""Permission checks for bot-mediated access to Discord content."""
-
 import hikari
 
 
@@ -34,11 +32,6 @@ def channel_permissions(member, guild, roles, channel):
 
 
 async def readable_channels(ctx):
-    """Use fresh permission data, never the bot's access, for pin listings.
-
-    Guild channel enumeration excludes threads. Only the interaction's own
-    thread may be listed, using the permissions supplied by Discord.
-    """
     rest = ctx.app.bot.rest
     member = await rest.fetch_member(ctx.i.guild_id, ctx.i.user.id)
     guild = await rest.fetch_guild(ctx.i.guild_id)

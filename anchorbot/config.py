@@ -8,8 +8,6 @@ from zoneinfo import ZoneInfo
 
 def load(path: str | Path, *, credentials: bool = True) -> dict:
     path = Path(path).resolve()
-    if os.name != "nt":
-        path.chmod(0o600)
     config = json.loads(path.read_text(encoding="utf-8-sig"))
     for key in ("tos_url", "support_url"):
         url = config.setdefault(key, "")

@@ -25,7 +25,7 @@ class AdminCommands:
             return
         request = self.app.db.control("reload")
         await ctx.reply(
-            f"Shard reload queued (request {request}). The supervisor will reread config.json and deploy the configured shards. Use `/admin stats` to check the result.",
+            f"Shard reload requested ({request}). Use `/admin stats` to check progress.",
             ephemeral=True,
         )
 

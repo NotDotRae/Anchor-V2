@@ -2,12 +2,14 @@ import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery } from "./_generated/server";
 
+import { syncExpiry } from "./expiries";
+
 const record = v.object({kind: v.string(), id: v.string(), value: v.string()});
 const change = v.object({kind: v.string(), id: v.string(), value: v.union(v.string(), v.null())});
 const stickyKinds = ["channel", "sticky", "slowSticky", "embedSticky", "embedImage",
   "bigEmbedImage", "webhookUrl", "webhookMessage"];
 function check(kind: string) {
-  if (!stickyKinds.includes(kind)) throw new Error("Only sticky-message data may be stored");
+  if (kind !== "guildPermissions" && !stickyKinds.includes(kind)) throw new Error("Only sticky-message data and Anchor permissions may be stored");
 }
 
 export const state = internalQuery({
@@ -24,6 +26,7 @@ export const upsert = internalMutation({
   args: {kind: v.string(), id: v.string(), value: v.string()}, returns: v.null(),
   handler: async (ctx, args) => {
     check(args.kind);
+    if (args.kind === "channel") await syncExpiry(ctx, args.id, args.value);
     const existing = await ctx.db.query("records").withIndex("by_kind_id",
       q => q.eq("kind", args.kind).eq("id", args.id)).unique();
     const row = {...args, updatedAt: Date.now()};
@@ -36,6 +39,7 @@ export const upsert = internalMutation({
 export const remove = internalMutation({
   args: {kind: v.string(), id: v.string()}, returns: v.null(),
   handler: async (ctx, args) => {
+    if (args.kind === "channel") await syncExpiry(ctx, args.id, null);
     const existing = await ctx.db.query("records").withIndex("by_kind_id",
       q => q.eq("kind", args.kind).eq("id", args.id)).unique();
     if (existing) await ctx.db.delete(existing._id);
@@ -46,6 +50,7 @@ export const remove = internalMutation({
 export const removeChannel = internalMutation({
   args: {channelId: v.string()}, returns: v.null(),
   handler: async (ctx, args) => {
+    await syncExpiry(ctx, args.channelId, null);
     for (const kind of stickyKinds) {
       const row = await ctx.db.query("records").withIndex("by_kind_id",
         q => q.eq("kind", kind).eq("id", args.channelId)).unique();
@@ -61,6 +66,7 @@ export const batch = internalMutation({
     if (changes.length > 100) throw new Error("Batch limit is 100 records");
     for (const {kind, id, value} of changes) {
       if (value !== null) check(kind);
+      if (kind === "channel") await syncExpiry(ctx, id, value);
       const existing = await ctx.db.query("records").withIndex("by_kind_id",
         q => q.eq("kind", kind).eq("id", id)).unique();
       if (value === null) {

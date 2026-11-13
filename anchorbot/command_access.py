@@ -1,4 +1,3 @@
-"""Channel-scoped command grants. Discord permissions remain independently required."""
 import json
 
 import hikari
@@ -53,8 +52,13 @@ def access_reason(db, interaction):
         return None
     if member.communication_disabled_until() is not None:
         return None
-    current = grants(channel_state(db, interaction.guild_id, interaction.channel_id))
-    if str(interaction.user.id) in current["users"]:
-        return "Direct user grant"
-    matched = sorted(set(map(str, member.role_ids)) & set(current["roles"]))
-    return "Role grant: " + ", ".join(f"<@&{role}>" for role in matched) if matched else None
+    for scope, current in (
+        ("Server", grants({"command_grants": db.server_grants(interaction.guild_id)})),
+        ("Channel", grants(channel_state(db, interaction.guild_id, interaction.channel_id))),
+    ):
+        if str(interaction.user.id) in current["users"]:
+            return f"{scope} user grant"
+        matched = sorted(set(map(str, member.role_ids)) & set(current["roles"]))
+        if matched:
+            return f"{scope} role grant: " + ", ".join(f"<@&{role}>" for role in matched)
+    return None

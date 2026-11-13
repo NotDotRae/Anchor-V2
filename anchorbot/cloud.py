@@ -35,10 +35,20 @@ class Cloud:
             if not rows:
                 return
             await self.request(
-                "batch", {"changes": [{"kind": "channel", "id": r["id"], "value": r["value"]} for r in rows]}
+                "batch", {"changes": [{"kind": "guildPermissions" if r["id"].startswith("guild:") else "channel",
+                                      "id": r["id"].removeprefix("guild:"), "value": r["value"]} for r in rows]}
             )
             self.db.acknowledge(rows)
             log.debug("convex_batch_saved records=%s", len(rows))
+
+    async def pull_expiries(self):
+        cursor = None
+        while True:
+            result = await self.request("expiries" + ("?" + urlencode({"cursor": cursor}) if cursor else ""))
+            self.db.receive_expiries(result["page"])
+            if result["isDone"]:
+                return
+            cursor = result["continueCursor"]
 
     async def read_snapshot(self):
         rows, cursor = [], None
@@ -52,22 +62,25 @@ class Cloud:
             if result["isDone"]:
                 break
             cursor = result["continueCursor"]
-        if any(r["kind"] != "channel" for r in rows):
+        if any(r["kind"] not in {"channel", "guildPermissions"} for r in rows):
             raise UnsupportedCloudState("Unsupported cloud records. Stop the bot and run migrate.convex.bat.")
-        states = {}
+        states, server_grants = {}, {}
         for row in rows:
             state = json.loads(row["value"])
+            if row["kind"] == "guildPermissions":
+                server_grants[row["id"]] = state
+                continue
             if "migration_deferred" in state:
                 log.warning("cloud_channel_deferred channel=%s rerun_migration_after_access_is_restored", row["id"])
                 continue
             states[row["id"]] = state
-        return states
+        return states, server_grants
 
     async def bootstrap(self):
-        states = await self.read_snapshot()
+        states, server_grants = await self.read_snapshot()
         if self.db.pending():
             await self.flush()
-            states = await self.read_snapshot()
-        self.db.install_snapshot(states.values())
+            states, server_grants = await self.read_snapshot()
+        self.db.install_snapshot(states.values(), server_grants)
         self.db.put("snapshot_loaded", True)
         log.info("cloud_snapshot_loaded channels=%s", len(states))

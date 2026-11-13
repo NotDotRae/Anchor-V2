@@ -355,7 +355,7 @@ class Supervisor:
                     datetime.now(UTC), self.config["restart_timezone"], self.config["restart_time"]
                 )
                 restart_config = (self.config["restart_timezone"], self.config["restart_time"])
-                sync_at = rebalance_at = topgg_at = time.time()
+                sync_at = expiry_at = rebalance_at = topgg_at = time.time()
                 while not self.stop.is_set():
                     self.db.put(
                         "supervisor",
@@ -380,7 +380,8 @@ class Supervisor:
                     now = time.time()
                     if not self.simulation:
                         await self.refresh_gateway_budget()
-                    if now >= sync_at and not self.simulation:
+                    if (now >= sync_at or self.db.get("cloud_sync_requested", False)) and not self.simulation:
+                        self.db.put("cloud_sync_requested", False)
                         try:
                             await self.cloud.flush()
                             self.db.put("cloud", {"ok": True, "synced": now})
@@ -388,6 +389,13 @@ class Supervisor:
                             log.exception("cloud_sync_failed_outbox_retained")
                             self.db.put("cloud", {"ok": False, "failed": now})
                         sync_at = now + self.config["convex_sync_interval_seconds"]
+                    if now >= expiry_at and not self.simulation:
+                        if self.db.has_due_expiries():
+                            try:
+                                await self.cloud.pull_expiries()
+                            except Exception:
+                                log.exception("convex_expiry_delivery_failed_retrying")
+                        expiry_at = now + 5
                     if datetime.now(UTC) >= restart:
                         try:
                             await self.scheduled_restart()
@@ -411,7 +419,6 @@ class Supervisor:
                                 log.exception("automatic_rebalance_failed")
                         with self.db.db:
                             cutoff = now - self.config["metrics_retention_days"] * 86400
-                            self.db.db.execute("DELETE FROM samples WHERE time<?", (cutoff,))
                             self.db.db.execute("DELETE FROM interactions WHERE created<?", (now - 900,))
                             self.db.db.execute("DELETE FROM guild_load WHERE updated<?", (cutoff,))
                             self.db.db.execute(

@@ -26,17 +26,18 @@ class LocalDB:
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS channels(id TEXT PRIMARY KEY, guild TEXT NOT NULL, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS server_grants(guild TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, value TEXT, revision INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, heartbeat REAL, value TEXT);
             CREATE TABLE IF NOT EXISTS guild_load(guild TEXT PRIMARY KEY, event_rate REAL, busy_rate REAL,
                 request_rate REAL, samples INTEGER, updated REAL);
-            CREATE TABLE IF NOT EXISTS samples(time REAL, worker INTEGER, value TEXT);
-            CREATE INDEX IF NOT EXISTS samples_time ON samples(time);
             CREATE TABLE IF NOT EXISTS controls(id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT,
                 count INTEGER, status TEXT DEFAULT 'pending', created REAL);
             CREATE TABLE IF NOT EXISTS permission_confirmations(token TEXT PRIMARY KEY, guild TEXT NOT NULL,
                 channel TEXT NOT NULL, actor TEXT NOT NULL, expires REAL NOT NULL, snapshot TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS expiry_events(token TEXT PRIMARY KEY, channel TEXT NOT NULL, guild TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS expiry_events_channel ON expiry_events(channel);
             CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, created REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS interactions_created ON interactions(created);
         """)
@@ -51,6 +52,18 @@ class LocalDB:
     def put(self, key, value):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, json.dumps(value)))
+
+    def server_grants(self, guild):
+        row = self.db.execute("SELECT value FROM server_grants WHERE guild=?", (str(guild),)).fetchone()
+        return json.loads(row[0]) if row else {"users": [], "roles": []}
+
+    def save_server_grants(self, guild, grants):
+        value = json.dumps(grants, separators=(",", ":"))
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO server_grants VALUES (?,?)", (str(guild), value))
+            self.db.execute(
+                "INSERT INTO outbox VALUES (?,?,1) ON CONFLICT(id) DO UPDATE SET "
+                "value=excluded.value,revision=outbox.revision+1", (f"guild:{guild}", value))
 
     def channels(self, shards=None, count=1):
         for row in self.db.execute("SELECT value,guild FROM channels"):
@@ -72,6 +85,7 @@ class LocalDB:
     def remove_channel(self, channel):
         with self.db:
             self.db.execute("DELETE FROM permission_confirmations WHERE channel=?", (str(channel),))
+            self.db.execute("DELETE FROM expiry_events WHERE channel=?", (str(channel),))
             self.db.execute("DELETE FROM channels WHERE id=?", (str(channel),))
             self.db.execute(
                 "INSERT INTO outbox VALUES (?,NULL,1) ON CONFLICT(id) DO UPDATE SET "
@@ -79,8 +93,12 @@ class LocalDB:
                 (str(channel),),
             )
 
-    def install_snapshot(self, states):
+    def install_snapshot(self, states, server_grants=None):
         with self.db:
+            if server_grants is not None:
+                self.db.execute("DELETE FROM server_grants")
+                self.db.executemany("INSERT INTO server_grants VALUES (?,?)",
+                                    [(guild, json.dumps(value)) for guild, value in server_grants.items()])
             self.db.execute("DELETE FROM channels")
             self.db.executemany(
                 "INSERT INTO channels VALUES (?,?,?)",
@@ -96,8 +114,36 @@ class LocalDB:
                 [(row["id"],) for row in channels],
             )
             self.db.execute("DELETE FROM permission_confirmations WHERE guild=?", (str(guild),))
+            self.db.execute("DELETE FROM expiry_events WHERE guild=?", (str(guild),))
             self.db.execute("DELETE FROM channels WHERE guild=?", (str(guild),))
             self.db.execute("DELETE FROM guild_load WHERE guild=?", (str(guild),))
+            self.db.execute("DELETE FROM server_grants WHERE guild=?", (str(guild),))
+            self.db.execute(
+                "INSERT INTO outbox VALUES (?,NULL,1) ON CONFLICT(id) DO UPDATE SET "
+                "value=NULL,revision=outbox.revision+1", (f"guild:{guild}",))
+
+    def receive_expiries(self, events):
+        with self.db:
+            # Accept only the current expiry generation. Late deliveries cannot stop a replacement pin.
+            for event in events:
+                row = self.db.execute("SELECT value FROM channels WHERE id=? AND guild=?",
+                                      (event["channel"], event["guild"])).fetchone()
+                if row and json.loads(row[0]).get("expiry", {}).get("token") == event["token"]:
+                    self.db.execute("INSERT OR IGNORE INTO expiry_events VALUES (?,?,?)",
+                                    (event["token"], event["channel"], event["guild"]))
+
+    def expiry_ready(self, channel, token):
+        return self.db.execute("SELECT 1 FROM expiry_events WHERE channel=? AND token=?",
+                               (str(channel), token)).fetchone() is not None
+
+    def forget_expiry(self, channel):
+        with self.db:
+            self.db.execute("DELETE FROM expiry_events WHERE channel=?", (str(channel),))
+
+    def has_due_expiries(self):
+        return self.db.execute(
+            "SELECT 1 FROM channels WHERE json_extract(value, '$.expiry.expires_at') <= ? LIMIT 1",
+            (time.time(),)).fetchone() is not None
 
     def pending(self):
         return [dict(r) for r in self.db.execute("SELECT * FROM outbox LIMIT 100")]
@@ -112,7 +158,6 @@ class LocalDB:
         now = time.time()
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO workers VALUES (?,?,?)", (worker, now, json.dumps(value)))
-            self.db.execute("INSERT INTO samples VALUES (?,?,?)", (now, worker, json.dumps(value)))
             for guild, (events, busy, requests, interval) in loads.items():
                 self.db.execute(
                     """INSERT INTO guild_load VALUES (?,?,?,?,1,?)

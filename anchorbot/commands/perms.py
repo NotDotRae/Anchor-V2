@@ -1,4 +1,3 @@
-"""Administrator-only channel grants and single-use clear confirmations."""
 import json
 import logging
 import math
@@ -26,33 +25,39 @@ def channel_option(required=True):
                   hikari.OptionType.CHANNEL, required, channel_types=CHANNEL_TYPES)
 
 
+def scope_option(required=True):
+    return option("scope", "Apply to the whole server or one exact channel.", hikari.OptionType.STRING,
+                  required, choices=[hikari.CommandChoice(name="Server", value="server"),
+                                     hikari.CommandChoice(name="Channel", value="channel")])
+
+
 class PermissionCommands:
     def __init__(self, app):
         self.app = app
         builder = hikari.impl.SlashCommandBuilder(
-            "perms", "Manage channel-specific Anchor command access.",
+            "perms", "Manage server and channel Anchor command access.",
             default_member_permissions=hikari.Permissions.ADMINISTRATOR,
             context_types=[hikari.ApplicationContextType.GUILD],
         )
         for action in ("add", "remove"):
             children = []
             for target, kind in (("user", hikari.OptionType.USER), ("role", hikari.OptionType.ROLE)):
-                description = (f"Allow a {target} to use pin commands in one channel." if action == "add"
-                               else f"Remove a {target}'s direct grant in one channel.")
+                description = (f"Allow a {target} to use pin commands in the selected scope." if action == "add"
+                               else f"Remove a {target}'s direct grant in the selected scope.")
                 children.append(option(target, description,
                     hikari.OptionType.SUB_COMMAND, False, options=[
-                        option(target, f"The {target} to {action}.", kind), channel_option(),
+                        option(target, f"The {target} to {action}.", kind), scope_option(), channel_option(False),
                     ]))
-            builder.add_option(option(action, f"{action.title()} a channel grant.",
+            builder.add_option(option(action, f"{action.title()} an Anchor grant.",
                                       hikari.OptionType.SUB_COMMAND_GROUP, False, options=children))
-        builder.add_option(option("list", "List channel grants in this server.", hikari.OptionType.SUB_COMMAND,
-            False, options=[channel_option(False), option("page", "Page of results.", hikari.OptionType.INTEGER,
+        builder.add_option(option("list", "List server and channel grants.", hikari.OptionType.SUB_COMMAND,
+            False, options=[scope_option(False), channel_option(False), option("page", "Page of results.", hikari.OptionType.INTEGER,
                                                         False, min_value=1)]))
         builder.add_option(option("check", "Explain a member's Anchor command access.",
             hikari.OptionType.SUB_COMMAND, False, options=[
                 option("user", "Member to check.", hikari.OptionType.USER), channel_option()]))
-        builder.add_option(option("clear", "Remove every grant from one channel after confirmation.",
-            hikari.OptionType.SUB_COMMAND, False, options=[channel_option()]))
+        builder.add_option(option("clear", "Clear grants in one scope after confirmation.",
+            hikari.OptionType.SUB_COMMAND, False, options=[scope_option(), channel_option(False)]))
         app.router.builders.append(builder)
         app.router.handlers["perms"] = self.handle
 
@@ -67,25 +72,28 @@ class PermissionCommands:
             await ctx.reply(ADMIN_ONLY, ephemeral=True)
             return
         await ctx.defer(ephemeral=True)
-        options = ctx.i.options or []
-        if len(options) != 1:
-            raise ValueError("Choose a valid `/perms` subcommand.")
-        branch = options[0]
-        action, target = branch.name, None
-        if action in {"add", "remove"}:
-            if not branch.options or len(branch.options) != 1:
-                raise ValueError("Choose a user or role.")
-            branch = branch.options[0]
-            target = branch.name
-            if target not in {"user", "role"}:
-                raise ValueError("Choose a user or role.")
-        values = {o.name: o.value for o in branch.options or []}
+        path = ctx.command_name.split()
+        action = path[1] if len(path) >= 2 else None
+        target = path[2] if len(path) == 3 else None
         if action not in {"add", "remove", "list", "check", "clear"}:
             raise ValueError("Choose a valid `/perms` subcommand.")
+        if action in {"add", "remove"}:
+            if target not in {"user", "role"}:
+                raise ValueError("Choose a user or role.")
+        elif len(path) != 2:
+            raise ValueError("Choose a valid `/perms` subcommand.")
+        values = ctx.options
         try:
             channel = await self.target_channel(ctx, values["channel"]) if "channel" in values else None
-            if action != "list" and channel is None:
-                raise ValueError("Choose a channel.")
+            scope = values.get("scope", "all" if action == "list" else "channel")
+            if scope not in {"server", "channel", "all"} or (scope == "all" and action != "list"):
+                raise ValueError("Choose server or channel scope.")
+            if scope == "server" and channel is not None:
+                raise ValueError("Do not choose a channel for server-wide permissions.")
+            if (scope == "channel" and action != "list" or action == "check") and channel is None:
+                raise ValueError("Choose a channel for channel permissions.")
+            if action in {"add", "remove", "clear"} and "scope" not in values:
+                raise ValueError("Choose server or channel scope.")
             if action in {"add", "remove"}:
                 subject = str(int(values[target]))
                 if target == "user":
@@ -95,12 +103,12 @@ class PermissionCommands:
                 else:
                     roles = await self.app.bot.rest.fetch_roles(ctx.i.guild_id)
                     if subject == str(ctx.i.guild_id):
-                        raise ValueError("The @everyone role cannot receive a channel grant. Choose a specific role.")
+                        raise ValueError("The @everyone role cannot receive an Anchor grant. Choose a specific role.")
                     if not any(str(role.id) == subject and role.guild_id == ctx.i.guild_id for role in roles):
                         raise ValueError("Choose a role in this server.")
                 await self.change(ctx, action, target, subject, channel)
             elif action == "list":
-                await self.list(ctx, channel, int(values.get("page", 1)))
+                await self.list(ctx, channel, int(values.get("page", 1)), scope)
             elif action == "check":
                 await self.check(ctx, str(int(values["user"])), channel)
             else:
@@ -109,51 +117,68 @@ class PermissionCommands:
             await ctx.reply("Unable to verify that member, role, or channel in this server. No permissions were changed.",
                             ephemeral=True)
 
+    def current(self, guild, channel):
+        return (grants(channel_state(self.app.db, guild, channel.id)) if channel else
+                grants({"command_grants": self.app.db.server_grants(guild)}))
+
+    def save(self, guild, channel, current):
+        if channel:
+            state = self.app.pins.state(channel.id, guild)
+            state["command_grants"] = current
+            self.app.db.save_channel(state)
+        else:
+            if str(guild) in self.app.pins.departed_guilds:
+                raise ValueError("Anchor is no longer in this server.")
+            self.app.db.save_server_grants(guild, current)
+
+    def lock_key(self, guild, channel):
+        return str(channel.id) if channel else f"guild:{guild}"
+
     async def change(self, ctx, action, target, subject, channel):
-        async with self.app.pins.locks[str(channel.id)]:
-            state = self.app.pins.state(channel.id, ctx.i.guild_id)
-            current = grants(state)
+        async with self.app.pins.locks[self.lock_key(ctx.i.guild_id, channel)]:
+            current = self.current(ctx.i.guild_id, channel)
             key = "users" if target == "user" else "roles"
             exists = subject in current[key]
             mention = f"<@{subject}>" if target == "user" else f"<@&{subject}>"
             if action == "add" and not exists:
                 if sum(map(len, current.values())) >= 100:
-                    raise ValueError("This channel already has 100 grants. Remove a grant before adding another.")
+                    raise ValueError("This scope already has 100 grants. Remove a grant first.")
                 current[key].append(subject)
             elif action == "remove" and exists:
                 current[key].remove(subject)
             changed = (action == "add") != exists
             if changed:
-                state["command_grants"] = current
-                self.app.db.save_channel(state)
-                log.info("command_grant_%s guild=%s channel=%s actor=%s target=%s:%s",
-                         action, ctx.i.guild_id, channel.id, ctx.i.user.id, target, subject)
-        if not changed:
-            text = (f"{mention} already has a {target} grant in <#{channel.id}>." if action == "add" else
-                    f"{mention} has no direct {target} grant in <#{channel.id}>.")
-            result = embed("Permissions unchanged", text)
-        elif action == "add":
-            result = embed("Channel access granted", f"{mention} can use Anchor pin commands in <#{channel.id}>.")
-        else:
-            result = embed("Channel grant removed", f"Removed {mention}'s {target} grant in <#{channel.id}>.")
-        await ctx.reply(embed=result, ephemeral=True)
+                self.save(ctx.i.guild_id, channel, current)
+                log.info("command_grant_%s guild=%s scope=%s actor=%s target=%s:%s",
+                         action, ctx.i.guild_id, self.lock_key(ctx.i.guild_id, channel),
+                         ctx.i.user.id, target, subject)
+        scope = f"<#{channel.id}>" if channel else "the whole server"
+        text = (f"{'Added' if action == 'add' else 'Removed'} {mention}'s {target} grant for {scope}."
+                if changed else f"{mention}'s {target} grant for {scope} is already {'present' if exists else 'absent'}.")
+        if action == "remove":
+            text += " Other user, role, or server grants may still provide access."
+        await ctx.reply(embed=embed("Anchor permissions", text), ephemeral=True)
 
-    async def list(self, ctx, channel, page):
+    async def list(self, ctx, channel, page, scope="all"):
         lines = []
-        for state in sorted(self.app.db.channels(), key=lambda s: s["id"]):
-            if state["guild_id"] != str(ctx.i.guild_id) or (channel and state["id"] != str(channel.id)):
-                continue
-            current = grants(state)
+        states = []
+        if scope in {"server", "all"} and channel is None:
+            states.append(("Server", self.current(ctx.i.guild_id, None)))
+        if scope in {"channel", "all"}:
+            states.extend((f"<#{state['id']}>", grants(state)) for state in
+                          sorted(self.app.db.channels(), key=lambda s: s["id"])
+                          if state["guild_id"] == str(ctx.i.guild_id)
+                          and (channel is None or state["id"] == str(channel.id)))
+        for label, current in states:
             for key in ("users", "roles"):
                 for subject in current[key]:
                     mention = f"<@{subject}>" if key == "users" else f"<@&{subject}>"
-                    lines.append(f"<#{state['id']}> · {mention} · {'User' if key == 'users' else 'Role'}")
+                    lines.append(f"{label} · {mention} · {'User' if key == 'users' else 'Role'}")
         pages = max(1, math.ceil(len(lines) / 20))
         if not 1 <= page <= pages:
             raise ValueError(f"Choose a page from 1 to {pages}.")
-        scope = f"Channel: <#{channel.id}>\n\n" if channel else ""
-        result = embed("Anchor channel permissions", scope +
-                       ("\n".join(lines[(page - 1) * 20:page * 20]) or "No channel grants configured."))
+        result = embed("Anchor permissions",
+                       "\n".join(lines[(page - 1) * 20:page * 20]) or "No grants configured in this scope.")
         result.set_footer(f"Page {page}/{pages} · {len(lines)} grants")
         await ctx.reply(embed=result, ephemeral=True)
 
@@ -165,25 +190,31 @@ class PermissionCommands:
         guild = await self.app.bot.rest.fetch_guild(ctx.i.guild_id)
         admin = member.id == guild.owner_id or any(
             r.permissions & hikari.Permissions.ADMINISTRATOR for r in roles if r.id in member.role_ids)
-        current = grants(channel_state(self.app.db, ctx.i.guild_id, channel.id))
-        user_grant = subject in current["users"]
-        role_grants = [role for role in current["roles"] if int(role) in member.role_ids]
-        allowed = admin or (member.communication_disabled_until() is None and (user_grant or bool(role_grants)))
-        role_text = ", ".join(f"<@&{role}>" for role in role_grants) or "N/A"
-        result = embed(
-            "Anchor access check",
-            f"Member: <@{subject}>\nChannel: <#{channel.id}>\n\n"
-            f"**Anchor command access**\n{'Allowed' if allowed else 'Denied'}\n\n"
-            f"User grant: {user_grant}\nRole grant: {role_text}",
-        )
+        details = []
+        granted = False
+        for label, current in (("Server", self.current(ctx.i.guild_id, None)),
+                               ("Channel", self.current(ctx.i.guild_id, channel))):
+            direct = subject in current["users"]
+            roles_matched = [role for role in current["roles"] if int(role) in member.role_ids]
+            granted |= direct or bool(roles_matched)
+            role_text = ", ".join(f"<@&{role}>" for role in roles_matched) or "N/A"
+            details.append((label, f"User grant: {direct}\nRole grants: {role_text}"))
+        allowed = admin or (member.communication_disabled_until() is None and granted)
+        result = embed("Anchor access check",
+                       f"Member: <@{subject}>\nChannel: <#{channel.id}>\n\n"
+                       f"Anchor grant: {'Allowed' if allowed else 'Denied'}\nAdministrator: {admin}\n"
+                       "\nDiscord channel visibility and posting permissions are also required.")
+        for label, text in details:
+            for offset in range(0, len(text), 1000):
+                result.add_field(f"{label} grants", text[offset:offset + 1000])
         await ctx.reply(embed=result, ephemeral=True)
 
     async def clear(self, ctx, channel):
-        async with self.app.pins.locks[str(channel.id)]:
-            current = grants(channel_state(self.app.db, ctx.i.guild_id, channel.id))
+        async with self.app.pins.locks[self.lock_key(ctx.i.guild_id, channel)]:
+            current = self.current(ctx.i.guild_id, channel)
             count = sum(map(len, current.values()))
             if not count:
-                await ctx.reply(embed=embed("Permissions unchanged", f"<#{channel.id}> has no channel grants to clear."), ephemeral=True)
+                await ctx.reply(embed=embed("Permissions unchanged", "This scope has no grants to clear."), ephemeral=True)
                 return
             token = secrets.token_urlsafe(24)
             now = time.time()
@@ -191,13 +222,14 @@ class PermissionCommands:
             with self.app.db.db:
                 self.app.db.db.execute("DELETE FROM permission_confirmations WHERE expires<?", (now,))
                 self.app.db.db.execute("INSERT INTO permission_confirmations VALUES (?,?,?,?,?,?)",
-                    (token, str(ctx.i.guild_id), str(channel.id), str(ctx.i.user.id), expires,
+                    (token, str(ctx.i.guild_id), self.lock_key(ctx.i.guild_id, channel), str(ctx.i.user.id), expires,
                      json.dumps(current, sort_keys=True)))
         row = hikari.impl.MessageActionRowBuilder()
         row.add_interactive_button(hikari.ButtonStyle.DANGER, f"perms:confirm:{token}", label="Clear grants")
         row.add_interactive_button(hikari.ButtonStyle.SECONDARY, f"perms:cancel:{token}", label="Cancel")
-        result = embed("Clear channel permissions?",
-                       f"Remove **{count}** {'grant' if count == 1 else 'grants'} from <#{channel.id}>?\n\n"
+        scope = f"<#{channel.id}>" if channel else "the whole server"
+        result = embed("Clear Anchor permissions?",
+                       f"Remove **{count}** {'grant' if count == 1 else 'grants'} from {scope}?\n\n"
                        f"Expires <t:{expires}:R>")
         await ctx.reply(embed=result, components=[row], ephemeral=True)
 
@@ -229,15 +261,24 @@ class PermissionCommands:
             if not taken:
                 result = embed("Confirmation unavailable", EXPIRED)
             elif parts[1] == "cancel":
-                result = embed("Permission clear cancelled", "No channel grants were changed.")
+                result = embed("Permission clear cancelled", "No grants were changed.")
             else:
-                state = self.app.pins.states.get(row["channel"])
-                current = grants(channel_state(self.app.db, interaction.guild_id, row["channel"]))
-                if not state or state["guild_id"] != row["guild"] or json.dumps(current, sort_keys=True) != row["snapshot"]:
-                    result = embed("Permissions changed", "The channel or its grants changed after this confirmation was created. Run `/perms clear` again.")
+                server = row["channel"] == f"guild:{interaction.guild_id}"
+                state = None if server else self.app.pins.states.get(row["channel"])
+                current = (self.current(interaction.guild_id, None) if server else
+                           grants(channel_state(self.app.db, interaction.guild_id, row["channel"])))
+                valid = (str(interaction.guild_id) not in self.app.pins.departed_guilds if server
+                         else state is not None and state["guild_id"] == row["guild"])
+                if not valid or json.dumps(current, sort_keys=True) != row["snapshot"]:
+                    result = embed("Permissions changed", "This scope changed. Run `/perms clear` again.")
                 else:
-                    state.pop("command_grants", None)
-                    self.app.db.save_channel(state)
-                    log.info("command_grants_cleared guild=%s channel=%s actor=%s", row["guild"], row["channel"], row["actor"])
-                    result = embed("Channel permissions cleared", f"Removed all grants from <#{row['channel']}>.")
+                    if server:
+                        self.app.db.save_server_grants(interaction.guild_id, {"users": [], "roles": []})
+                    else:
+                        state.pop("command_grants", None)
+                        self.app.db.save_channel(state)
+                    log.info("command_grants_cleared guild=%s scope=%s actor=%s",
+                             row["guild"], row["channel"], row["actor"])
+                    scope = "the whole server" if server else f"<#{row['channel']}>"
+                    result = embed("Anchor permissions cleared", f"Removed all direct grants from {scope}.")
         await interaction.edit_initial_response(embed=result, components=[], **SAFE_MENTIONS)

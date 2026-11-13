@@ -15,5 +15,6 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .DS_Store
+/anchor.svg
 migration-backups/
 convex-outbox.jsonl

@@ -3,7 +3,9 @@ from urllib.parse import urlparse
 import hikari
 
 from ..command_access import is_admin
+from ..expiry import parse_expiry
 from ..permissions import readable_channels
+from ..pins import MAX_INTERVAL, MIN_INTERVAL
 from ..style import SAFE_MENTIONS, embed, webhook_parts
 
 
@@ -39,8 +41,15 @@ class StickyCommands:
                 else "Stop pins in this channel.",
                 self.stop,
             )
-        for name in ("stick list",):
-            router.add(name, "List active pins in this server.", self.list)
+        router.add("pause", "Pause this channel's pin without deleting it.", self.configure)
+        router.add("resume", "Resume this channel's paused pin.", self.configure)
+        router.add("stick frequency", "Set the minimum time between posts.",
+                   self.configure, ("seconds", "Time between posts in seconds (5–120).", hikari.OptionType.INTEGER, True),
+                   minimum=MIN_INTERVAL, maximum=MAX_INTERVAL)
+        router.add("stick expire", "Expire this channel's pin, or cancel expiry with off.", self.expire,
+                   ("after", "Duration: 30m, 2h, 1d, 1h30m; off cancels expiry.", hikari.OptionType.STRING, True),
+                   maximum=32)
+        router.add("stick list", "List active pins in this server.", self.list)
         descriptions = {
             "image set": "Set the small image for pin embeds.",
             "image big set": "Set the large image for pin embeds.",
@@ -48,7 +57,6 @@ class StickyCommands:
             "image remove": "Remove the small image for pin embeds.",
             "image big remove": "Remove the large image for pin embeds.",
             "image get": "Show the current image settings.",
-            "image big get": "Show the current large image setting.",
         }
         for name, description in descriptions.items():
             router.add(
@@ -59,13 +67,22 @@ class StickyCommands:
                 maximum=1000,
             )
 
+        stick = next(builder for builder in router.builders if builder.name == "stick")
+        anchor = hikari.impl.SlashCommandBuilder(
+            "anchor", "Anchor commands.", context_types=[hikari.ApplicationContextType.GUILD],
+        )
+        for command in stick.options:
+            anchor.add_option(command)
+            router.handlers[f"anchor {command.name}"] = router.handlers[f"stick {command.name}"]
+        router.builders.append(anchor)
+
     async def start(self, ctx):
         if not await ctx.manage():
             return
         if not await ctx.can_post():
             return
-        kinds = {"stick start": "classic", "stick slow": "slow", "stick embed": "embed", "stick webhook": "webhook"}
-        kind = kinds[ctx.command_name]
+        kinds = {"start": "classic", "slow": "slow", "embed": "embed", "webhook": "webhook"}
+        kind = kinds[ctx.command_name.rsplit(" ", 1)[-1]]
         text = ctx.value("message")
         if not text:
             raise ValueError(
@@ -87,6 +104,36 @@ class StickyCommands:
         await ctx.reply(
             "Webhook pin stopped in this channel." if webhook else f"Pins stopped in <#{ctx.i.channel_id}>."
         )
+
+    async def configure(self, ctx):
+        if not await ctx.manage():
+            return
+        resume = ctx.command_name == "resume"
+        publish = ctx.command_name != "pause"
+        if publish and not await ctx.can_post():
+            return
+        await ctx.defer(ephemeral=True)
+        kwargs = ({"interval": ctx.value("seconds")} if ctx.command_name.endswith(" frequency")
+                  else {"paused": not resume})
+        await self.app.pins.configure(ctx.i.channel_id, ctx.i.guild_id, **kwargs,
+                                      authorize=ctx.require_publish if publish else ctx.require_access)
+        text = (f"Post frequency set to {kwargs['interval']} seconds." if "interval" in kwargs
+                else "Pin resumed." if resume else "Pin paused.")
+        await ctx.reply(text, ephemeral=True)
+
+    async def expire(self, ctx):
+        if not await ctx.manage():
+            return
+        seconds = parse_expiry(ctx.value("after"))
+        await ctx.defer(ephemeral=True)
+        expiry = await self.app.pins.set_expiry(ctx.i.channel_id, ctx.i.guild_id, seconds,
+                                               authorize=ctx.require_access)
+        if expiry:
+            deadline = int(expiry["expires_at"])
+            text = f"Pin expires <t:{deadline}:F> (<t:{deadline}:R>)."
+        else:
+            text = "Pin expiry canceled."
+        await ctx.reply(text, ephemeral=True)
 
     async def settings(self, ctx):
         if not await ctx.manage():
@@ -162,7 +209,11 @@ class StickyCommands:
                 if (state["guild_id"] != str(ctx.i.guild_id)
                     or state["id"] not in readable or kind not in state["pins"]):
                     continue
-                value = f"Channel: <#{state['id']}>\n__Pinned Message:__```\n{state['pins'][kind]['text']}```"
+                status = "Paused" if state.get("paused") else "Active"
+                frequency = state.get("interval_seconds", "Default")
+                expiry = state.get("expiry")
+                expires = f" · Expires <t:{int(expiry['expires_at'])}:R>" if expiry else ""
+                value = f"Channel: <#{state['id']}> · {status} · Frequency: {frequency}{expires}\n__Pinned Message:__```\n{state['pins'][kind]['text']}```"
                 for offset in range(0, len(value), 1024):
                     chunk = value[offset : offset + 1024]
                     if len(result.fields) == 20 or size + len(chunk) > 4500:

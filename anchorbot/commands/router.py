@@ -95,7 +95,7 @@ class Router:
         self.handlers = {}
         self.builders = []
 
-    def add(self, name, description, handler, option=None, *, maximum=4000, subcommand=None):
+    def add(self, name, description, handler, option=None, *, maximum=4000, minimum=None, subcommand=None):
         path = name.split() + ([subcommand] if subcommand else [])
         if not 1 <= len(path) <= 3:
             raise ValueError("Slash commands support a root, optional group, and subcommand")
@@ -105,6 +105,8 @@ class Router:
             leaf_options.append(hikari.CommandOption(
                 type=kind, name=key, description=desc, is_required=required,
                 max_length=maximum if kind == hikari.OptionType.STRING else None,
+                min_value=minimum if kind == hikari.OptionType.INTEGER else None,
+                max_value=maximum if kind == hikari.OptionType.INTEGER else None,
             ))
         builder = next((b for b in self.builders if b.name == path[0]), None)
         if builder is None:

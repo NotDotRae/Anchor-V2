@@ -15,7 +15,7 @@ class Presence:
 
     def activity(self):
         if int(max(0, time.time() - self.started) // INTERVAL) % 2:
-            text = f"Tracking {self.app.db.tracked_messages():,} messages"
+            text = f"{self.app.db.tracked_messages():,} Messages Anchored"
         else:
             text = self.app.config["kofi_url"]
         return hikari.Activity(name="Custom Status", type=hikari.ActivityType.CUSTOM, state=text)

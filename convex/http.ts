@@ -76,4 +76,15 @@ http.route({
   }),
 });
 
+http.route({
+  path: "/expiries", method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    if (!authorized(request)) return json({error: "unauthorized"}, 401);
+    const cursor = new URL(request.url).searchParams.get("cursor");
+    return json(await ctx.runQuery(internal.expiries.ready, {
+      paginationOpts: {cursor, numItems: 100},
+    }));
+  }),
+});
+
 export default http;
